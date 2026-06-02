@@ -149,13 +149,12 @@ def main():
             continue
 
         campos_para_atualizar = {
-            "primeiro-nome":  row.get("primeiro_nome", ""),
-            "telefone":       tel_formatado,
-            "Data_Orcamento": row.get("Data_Orcamento", ""),
-            "valor_orcado":   row.get("valor_orcado", ""),
-            "Proced_Orcado":  row.get("Proced_Orcado", ""),
-            "Inatividade":    row.get("Inatividade", ""),
-        }
+    "Telefone":       tel_formatado,
+    "Data_Orçamento": row.get("Data_Orcamento", ""),
+    "valor_orcado":   row.get("valor_orcado", ""),
+    "Proced_Orçado":  row.get("Proced_Orcado", ""),
+    "Inatividade":    row.get("Inatividade", ""),
+}
 
         campos_ok = []
         for key, valor in campos_para_atualizar.items():
