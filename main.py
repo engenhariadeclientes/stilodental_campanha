@@ -11,17 +11,35 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-API_KEY = os.environ["BOTCONVERSA_API_KEY"]
-BASE_URL = "https://api.botconversa.com.br/api/v1"
-HEADERS = {"api-key": API_KEY, "Content-Type": "application/json"}
+API_KEY  = os.environ["BOTCONVERSA_API_KEY"]
+BASE_URL = "https://backend.botconversa.com.br/api/v1/webhook"
+HEADERS  = {
+    "api-key": API_KEY,
+    "Content-Type": "application/json"
+}
 
 DELAY = 1.2  # segundos entre requests
+CAMPO_IDS = {}
+
+
+def listar_campos_personalizados():
+    try:
+        resp = requests.get(f"{BASE_URL}/custom_fields/", headers=HEADERS, timeout=15)
+        if resp.status_code == 200:
+            campos = resp.json()
+            for campo in campos:
+                CAMPO_IDS[campo["key"]] = campo["id"]
+            log.info(f"Campos personalizados carregados: {CAMPO_IDS}")
+        else:
+            log.error(f"Erro ao listar campos: HTTP {resp.status_code} → {resp.text[:200]}")
+    except Exception as e:
+        log.error(f"Erro ao listar campos: {e}")
 
 
 def buscar_contato(telefone: str) -> dict | None:
     try:
         resp = requests.get(
-            f"{BASE_URL}/contact/getByPhone/{telefone}",
+            f"{BASE_URL}/subscriber/get_by_phone/{telefone}/",
             headers=HEADERS,
             timeout=15
         )
@@ -37,93 +55,125 @@ def buscar_contato(telefone: str) -> dict | None:
         return None
 
 
-def atualizar_contato(telefone: str, campos: dict) -> bool:
+def criar_contato(telefone: str, primeiro_nome: str, sobrenome: str) -> dict | None:
     payload = {
         "phone": telefone,
-        "custom_fields": campos
+        "first_name": primeiro_nome,
+        "last_name": sobrenome
     }
     try:
-        resp = requests.patch(
-            f"{BASE_URL}/contact/updateByPhone",
+        resp = requests.post(
+            f"{BASE_URL}/subscriber/",
             headers=HEADERS,
             json=payload,
             timeout=15
         )
         if resp.status_code in (200, 201):
-            return True
+            return resp.json()
         else:
-            log.warning(f"Atualização {telefone} → HTTP {resp.status_code}: {resp.text[:200]}")
-            return False
+            log.warning(f"Criação {telefone} → HTTP {resp.status_code}: {resp.text[:200]}")
+            return None
     except Exception as e:
-        log.error(f"Erro ao atualizar {telefone}: {e}")
+        log.error(f"Erro ao criar {telefone}: {e}")
+        return None
+
+
+def atualizar_campo(subscriber_id: int, campo_key: str, valor: str) -> bool:
+    campo_id = CAMPO_IDS.get(campo_key)
+    if not campo_id:
+        log.warning(f"  Campo '{campo_key}' não encontrado — pulando")
+        return False
+    try:
+        resp = requests.post(
+            f"{BASE_URL}/subscriber/{subscriber_id}/custom_fields/{campo_id}/",
+            headers=HEADERS,
+            json={"value": valor},
+            timeout=15
+        )
+        return resp.status_code in (200, 201)
+    except Exception as e:
+        log.error(f"Erro ao atualizar campo {campo_key}: {e}")
         return False
 
 
 def main():
-    df = pd.read_csv("dados_pacientes.csv", dtype=str).fillna("")
+    listar_campos_personalizados()
+    if not CAMPO_IDS:
+        log.error("Nenhum campo personalizado encontrado. Verifique a API key.")
+        return
 
+    df = pd.read_csv("dados_pacientes.csv", dtype=str).fillna("")
     total = len(df)
-    sucesso = 0
-    nao_encontrado = 0
+    criados = 0
+    atualizados = 0
     erro = 0
 
-    log.info(f"Iniciando atualização de {total} contatos...")
+    log.info(f"Iniciando processamento de {total} contatos...")
     log.info("=" * 60)
 
     for i, row in df.iterrows():
-        nome     = row["Paciente"]
-        telefone = row["telefone"]
+        nome_completo = row["Paciente"]
+        telefone      = row["telefone"]
+        partes        = nome_completo.strip().split()
+        primeiro      = partes[0].capitalize() if partes else ""
+        sobrenome     = " ".join(partes[1:]) if len(partes) > 1 else ""
+        tel_formatado = f"+{telefone}" if not telefone.startswith("+") else telefone
 
         if not telefone:
-            log.warning(f"[{i+1}/{total}] {nome} — sem telefone, pulando")
+            log.warning(f"[{i+1}/{total}] {nome_completo} — sem telefone, pulando")
             erro += 1
             continue
 
-        log.info(f"[{i+1}/{total}] {nome} ({telefone})")
+        log.info(f"[{i+1}/{total}] {nome_completo} ({tel_formatado})")
 
-        # Buscar contato
-        contato = buscar_contato(telefone)
+        contato = buscar_contato(tel_formatado)
         time.sleep(DELAY)
 
         if contato is None:
-            log.warning(f"  → Não encontrado no BotConversa")
-            nao_encontrado += 1
+            log.info(f"  → Não encontrado, criando...")
+            contato = criar_contato(tel_formatado, primeiro, sobrenome)
+            time.sleep(DELAY)
+            if contato is None:
+                log.warning(f"  → ✗ Falha ao criar contato")
+                erro += 1
+                continue
+            criados += 1
+            log.info(f"  → Contato criado (ID: {contato.get('id')})")
+        else:
+            log.info(f"  → Encontrado (ID: {contato.get('id')})")
+
+        subscriber_id = contato.get("id")
+        if not subscriber_id:
+            log.warning(f"  → ✗ ID não retornado pela API")
+            erro += 1
             continue
 
-        # Montar campos personalizados com o que temos
-        campos = {}
+        campos_para_atualizar = {
+            "primeiro-nome":  row.get("primeiro_nome", ""),
+            "telefone":       tel_formatado,
+            "Data_Orcamento": row.get("Data_Orcamento", ""),
+            "valor_orcado":   row.get("valor_orcado", ""),
+            "Proced_Orcado":  row.get("Proced_Orcado", ""),
+            "Inatividade":    row.get("Inatividade", ""),
+        }
 
-        if row.get("primeiro_nome"):
-            campos["primeiro-nome"] = row["primeiro_nome"]
+        campos_ok = []
+        for key, valor in campos_para_atualizar.items():
+            if valor and key in CAMPO_IDS:
+                ok = atualizar_campo(subscriber_id, key, valor)
+                time.sleep(0.5)
+                if ok:
+                    campos_ok.append(key)
 
-        if row.get("telefone"):
-            campos["telefone"] = row["telefone"]
-
-        if row.get("Data_Orcamento"):
-            campos["Data_Orcamento"] = row["Data_Orcamento"]
-
-        if row.get("valor_orcado"):
-            campos["valor_orcado"] = row["valor_orcado"]
-
-        if row.get("Proced_Orcado"):
-            campos["Proced_Orcado"] = row["Proced_Orcado"]
-
-        if row.get("Inatividade"):
-            campos["Inatividade"] = row["Inatividade"]
-
-        ok = atualizar_contato(telefone, campos)
-        time.sleep(DELAY)
-
-        if ok:
-            campos_str = " | ".join(f"{k}: {v}" for k, v in campos.items())
-            log.info(f"  → ✓ {campos_str}")
-            sucesso += 1
+        if campos_ok:
+            log.info(f"  → ✓ Campos atualizados: {', '.join(campos_ok)}")
+            atualizados += 1
         else:
-            log.warning(f"  → ✗ Falha na atualização")
+            log.warning(f"  → Nenhum campo atualizado (verifique os keys no BotConversa)")
             erro += 1
 
     log.info("=" * 60)
-    log.info(f"CONCLUÍDO: {sucesso} atualizados | {nao_encontrado} não encontrados | {erro} erros")
+    log.info(f"CONCLUÍDO: {criados} criados | {atualizados} atualizados | {erro} erros")
 
 
 if __name__ == "__main__":
